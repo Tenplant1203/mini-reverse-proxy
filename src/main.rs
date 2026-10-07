@@ -1,13 +1,7 @@
-use std::{convert::Infallible, fmt, net::SocketAddr};
+use std::{fmt, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 
-use http_body_util::Full;
-use hyper::{
-    Request, Response,
-    body::{Bytes, Incoming},
-    server::conn::http1,
-    service::service_fn,
-};
+use hyper::{Request, Response, body::Incoming, server::conn::http1, service::service_fn};
 
 use hyper_util::rt::TokioIo;
 
@@ -70,7 +64,7 @@ impl From<hyper::http::uri::InvalidUri> for ProxyError {
     }
 }
 
-async fn proxy(req: Request<Incoming>) -> Result<Response<Incoming>, ProxyError> {
+async fn proxy(mut request: Request<Incoming>) -> Result<Response<Incoming>, ProxyError> {
     let url = "http://127.0.0.1:3000".parse::<hyper::Uri>()?;
 
     let host = url.host().expect("uri has no host");
@@ -90,6 +84,11 @@ async fn proxy(req: Request<Incoming>) -> Result<Response<Incoming>, ProxyError>
         }
     });
 
-    let res = sender.send_request(req).await?;
-    Ok(res)
+    request.headers_mut().insert(
+        hyper::http::header::HOST,
+        hyper::http::HeaderValue::from_static("http://127.0.0.1:3000"),
+    );
+
+    let response = sender.send_request(request).await?;
+    Ok(response)
 }
