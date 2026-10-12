@@ -86,7 +86,7 @@ async fn proxy(mut request: Request<Incoming>) -> Result<Response<Incoming>, Pro
 
     request.headers_mut().insert(
         hyper::http::header::HOST,
-        hyper::http::HeaderValue::from_static("http://127.0.0.1:3000"),
+        hyper::http::HeaderValue::from_static("127.0.0.1:3000"),
     );
 
     let response = sender.send_request(request).await?;
