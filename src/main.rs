@@ -1,7 +1,13 @@
-use std::{fmt, net::SocketAddr};
+use http_body_util::Full;
+use std::{convert::Infallible, fmt, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 
-use hyper::{Request, Response, body::Incoming, server::conn::http1, service::service_fn};
+use hyper::{
+    Request, Response,
+    body::{Bytes, Incoming},
+    server::conn::http1,
+    service::service_fn,
+};
 
 use hyper_util::rt::TokioIo;
 
@@ -64,7 +70,7 @@ impl From<hyper::http::uri::InvalidUri> for ProxyError {
     }
 }
 
-async fn proxy(mut request: Request<Incoming>) -> Result<Response<Incoming>, ProxyError> {
+async fn proxy_inner(mut request: Request<Incoming>) -> Result<Response<Incoming>, ProxyError> {
     let url = "http://127.0.0.1:3000".parse::<hyper::Uri>()?;
 
     let host = url.host().expect("uri has no host");
@@ -91,4 +97,34 @@ async fn proxy(mut request: Request<Incoming>) -> Result<Response<Incoming>, Pro
 
     let response = sender.send_request(request).await?;
     Ok(response)
+}
+
+fn error_response(error: ProxyError) -> Response<Full<Bytes>> {
+    match error {
+        ProxyError::Io(_err) => hyper::http::response::Builder::new()
+            .status(502)
+            .body(Full::new(Bytes::from("Bad Gateway")))
+            .unwrap(),
+        ProxyError::Hyper(_err) => hyper::http::response::Builder::new()
+            .status(502)
+            .body(Full::new(Bytes::from("Bad Gateway")))
+            .unwrap(),
+        ProxyError::InvalidUri(_err) => hyper::http::response::Builder::new()
+            .status(500)
+            .body(Full::new(Bytes::from("Internal Server Error")))
+            .unwrap(),
+    }
+}
+
+async fn proxy(
+    request: hyper::http::Request<Incoming>,
+) -> Result<Response<http_body_util::Either<Incoming, Full<Bytes>>>, Infallible> {
+    match proxy_inner(request).await {
+        Ok(response) => Ok(response.map(http_body_util::Either::Left)),
+        Err(err) => {
+            let log = err.to_string();
+            eprintln!("{log}");
+            Ok(error_response(err).map(http_body_util::Either::Right))
+        }
+    }
 }
