@@ -3,7 +3,7 @@ use std::{convert::Infallible, fmt, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 
 use hyper::{
-    Request, Response,
+    Response,
     body::{Bytes, Incoming},
     server::conn::http1,
     service::service_fn,
@@ -37,6 +37,15 @@ enum ProxyError {
     Hyper(hyper::Error),
     // Http(hyper::http::Error),
     InvalidUri(hyper::http::uri::InvalidUri),
+    // HeaderValue(hyper::http::header::InvalidHeaderValue),
+    ClientHeader(HeaderError),
+    UpstreamHeader(HeaderError),
+}
+
+#[derive(Debug)]
+enum HeaderError {
+    InvalidName(hyper::http::header::InvalidHeaderName),
+    ToStr(hyper::http::header::ToStrError),
 }
 
 impl fmt::Display for ProxyError {
@@ -46,6 +55,18 @@ impl fmt::Display for ProxyError {
             ProxyError::Hyper(err) => write!(f, "Hyper error: {}", err),
             // ProxyError::Http(err) => write!(f, "HTTP error: {}", err),
             ProxyError::InvalidUri(err) => write!(f, "Invalid URI: {}", err),
+            // ProxyError::HeaderValue(err) => write!(f, "Invalid Header Value: {}", err),
+            ProxyError::ClientHeader(err) => write!(f, "Invalid Header Name: {}", err),
+            ProxyError::UpstreamHeader(err) => write!(f, "Invalid Header Name: {}", err),
+        }
+    }
+}
+
+impl fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HeaderError::InvalidName(err) => write!(f, "{}", err),
+            HeaderError::ToStr(err) => write!(f, "{}", err),
         }
     }
 }
@@ -70,7 +91,61 @@ impl From<hyper::http::uri::InvalidUri> for ProxyError {
     }
 }
 
-async fn proxy_inner(mut request: Request<Incoming>) -> Result<Response<Incoming>, ProxyError> {
+impl From<hyper::http::header::InvalidHeaderName> for HeaderError {
+    fn from(err: hyper::http::header::InvalidHeaderName) -> Self {
+        HeaderError::InvalidName(err)
+    }
+}
+
+impl From<hyper::http::header::ToStrError> for HeaderError {
+    fn from(err: hyper::http::header::ToStrError) -> Self {
+        HeaderError::ToStr(err)
+    }
+}
+
+fn remove_hop_by_hop_headers(
+    header_map: &mut hyper::http::header::HeaderMap,
+) -> Result<(), HeaderError> {
+    let connection_list_str_headers = header_map
+        .get_all(hyper::http::header::CONNECTION)
+        .iter()
+        .map(|value| value.to_str())
+        .collect::<Result<Vec<&str>, _>>()?;
+
+    let connection_list_headers_name = connection_list_str_headers
+        .into_iter()
+        .flat_map(|s| s.split(","))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| hyper::http::HeaderName::from_bytes(name.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut hop_by_hop_headers_name = vec![
+        // TODO: TRANSFER_ENCODING周りの処理実装
+        // 現状はローカル環境のみに限定する
+        // 単にTRANSFER_ENCODING Headerを削除するだけだとBodyのframing情報が保持できないので、
+        // 結果としてGETリクエストなどにおいてBodyがないものとして扱われてしまう。
+        // またHTTP2, HTTP3の対応やgzipの対応情報(TE)の確認などの処理を行う必要がある。
+        // hyper::http::header::TRANSFER_ENCODING,
+        hyper::http::header::TE,
+        hyper::http::header::UPGRADE,
+        hyper::http::header::CONNECTION,
+        hyper::http::HeaderName::from_static("keep-alive"),
+        hyper::http::HeaderName::from_static("proxy-connection"),
+    ];
+
+    hop_by_hop_headers_name.extend(connection_list_headers_name);
+
+    for header_name in hop_by_hop_headers_name.iter() {
+        header_map.remove(header_name);
+    }
+
+    Ok(())
+}
+
+async fn proxy_inner(
+    mut request: hyper::Request<Incoming>,
+) -> Result<Response<Incoming>, ProxyError> {
     let url = "http://127.0.0.1:3000".parse::<hyper::Uri>()?;
 
     let host = url.host().expect("uri has no host");
@@ -90,12 +165,14 @@ async fn proxy_inner(mut request: Request<Incoming>) -> Result<Response<Incoming
         }
     });
 
+    remove_hop_by_hop_headers(request.headers_mut()).map_err(ProxyError::ClientHeader)?;
     request.headers_mut().insert(
         hyper::http::header::HOST,
         hyper::http::HeaderValue::from_static("127.0.0.1:3000"),
     );
 
-    let response = sender.send_request(request).await?;
+    let mut response = sender.send_request(request).await?;
+    remove_hop_by_hop_headers(response.headers_mut()).map_err(ProxyError::UpstreamHeader)?;
     Ok(response)
 }
 
@@ -111,6 +188,19 @@ fn error_response(error: ProxyError) -> Response<Full<Bytes>> {
             .unwrap(),
         ProxyError::InvalidUri(_err) => hyper::http::response::Builder::new()
             .status(500)
+            .body(Full::new(Bytes::from("Internal Server Error")))
+            .unwrap(),
+        // ProxyError::HeaderValue(_err) => hyper::http::response::Builder::new()
+        //     .status(500)
+        //     .body(Full::new(Bytes::from("Internal Server Error")))
+        //     .unwrap(),
+        ProxyError::ClientHeader(_err) => hyper::http::response::Builder::new()
+            .status(400)
+            .body(Full::new(Bytes::from("Internal Server Error")))
+            .unwrap(),
+
+        ProxyError::UpstreamHeader(_err) => hyper::http::response::Builder::new()
+            .status(502)
             .body(Full::new(Bytes::from("Internal Server Error")))
             .unwrap(),
     }
