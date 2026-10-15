@@ -196,12 +196,12 @@ fn error_response(error: ProxyError) -> Response<Full<Bytes>> {
         //     .unwrap(),
         ProxyError::ClientHeader(_err) => hyper::http::response::Builder::new()
             .status(400)
-            .body(Full::new(Bytes::from("Internal Server Error")))
+            .body(Full::new(Bytes::from("Bad Request")))
             .unwrap(),
 
         ProxyError::UpstreamHeader(_err) => hyper::http::response::Builder::new()
             .status(502)
-            .body(Full::new(Bytes::from("Internal Server Error")))
+            .body(Full::new(Bytes::from("Bad Gateway")))
             .unwrap(),
     }
 }
